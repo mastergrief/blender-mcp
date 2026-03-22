@@ -560,6 +560,48 @@ def import_sins2_mesh(ctx: Context, mesh_path: str = None, entity_id: str = None
 
 
 @mcp.tool()
+def import_rebellion_mesh(ctx: Context, mesh_path: str = None, entity_id: str = None, add_meshpoints: bool = True, normalize: bool = True) -> str:
+    """
+    Import a Sins of a Solar Empire: Rebellion .mesh file (e.g., from Sins of the Prophets mod).
+    Different binary format from SoSE2 — this tool handles the conversion.
+
+    Parameters:
+    - mesh_path: Full path to the Rebellion .mesh file
+    - entity_id: Entity name shorthand — resolves to docs/reference-mods/sotp/Mesh/<ENTITY_ID>.mesh
+    - add_meshpoints: Add meshpoints as empties (default True)
+    - normalize: Scale to 100 units longest dimension (default True)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("import_rebellion_mesh", {
+            "mesh_path": mesh_path,
+            "entity_id": entity_id,
+            "add_meshpoints": add_meshpoints,
+            "normalize": normalize
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+
+        output = f"Imported (Rebellion): {result.get('entity_id', '?')}\n"
+        output += f"  Source:     rebellion\n"
+        output += f"  Vertices:   {result.get('vertices', '?'):,}\n"
+        output += f"  Faces:      {result.get('faces', '?'):,}\n"
+        output += f"  Meshpoints: {result.get('meshpoints', '?')}\n"
+        mats = result.get('materials', [])
+        if mats:
+            output += f"  Textures:   {', '.join(mats)}\n"
+        spans = result.get('spans', {})
+        if spans:
+            output += f"  Spans: X={spans.get('X', '?')}, Y={spans.get('Y', '?')}, Z={spans.get('Z', '?')}\n"
+        if result.get('normalized'):
+            output += f"  Normalized to 100 units\n"
+        return output
+    except Exception as e:
+        logger.error(f"Error importing rebellion mesh: {str(e)}")
+        return f"Error importing rebellion mesh: {str(e)}"
+
+
+@mcp.tool()
 def export_sins2_mesh(ctx: Context, entity_id: str, copy_to_repo: bool = True) -> str:
     """
     Export current mesh as SoSE2 .mesh with full post-processing pipeline.

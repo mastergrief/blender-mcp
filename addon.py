@@ -213,6 +213,7 @@ class BlenderMCPServer:
             "render_cross_section": self.render_cross_section,
             "get_mesh_stats": self.get_mesh_stats,
             "import_sins2_mesh": self.import_sins2_mesh,
+            "import_rebellion_mesh": self.import_rebellion_mesh,
             "export_sins2_mesh": self.export_sins2_mesh,
             "add_base_meshpoints": self.add_base_meshpoints,
         }
@@ -1218,6 +1219,194 @@ class BlenderMCPServer:
                 result["normalized_size"] = 100
             return result
         except Exception as e:
+            return {"error": str(e)}
+
+    def import_rebellion_mesh(self, mesh_path=None, entity_id=None, add_meshpoints=True, normalize=True):
+        """Import a Sins: Rebellion .mesh file."""
+        import struct, sys, math
+        try:
+            # Resolve path
+            if not mesh_path and entity_id:
+                import glob
+                sotp_dir = r"C:\Users\gabes\projects\sins2-modpack\docs\reference-mods\sotp\Mesh"
+                # Case-insensitive search
+                candidates = glob.glob(os.path.join(sotp_dir, f"*{entity_id}*"), recursive=False)
+                if not candidates:
+                    # Try uppercase
+                    candidates = glob.glob(os.path.join(sotp_dir, f"*{entity_id.upper()}*"), recursive=False)
+                if candidates:
+                    mesh_path = candidates[0]
+                else:
+                    return {"error": f"No Rebellion mesh found matching '{entity_id}' in {sotp_dir}"}
+
+            if not mesh_path:
+                return {"error": "Provide mesh_path or entity_id"}
+
+            with open(mesh_path, 'rb') as f:
+                data = f.read()
+
+            # Parse header
+            off = 0
+            magic = data[off:off+4]; off += 4
+            if magic != b'BIN\n':
+                return {"error": f"Not a Rebellion mesh (magic: {magic})"}
+
+            version = struct.unpack_from('<I', data, off)[0]; off += 4
+            flag = data[off]; off += 1
+            bb = struct.unpack_from('<7f', data, off); off += 28
+            mat_count = struct.unpack_from('<I', data, off)[0]; off += 4
+
+            # Read texture strings
+            texture_names = []
+            if flag == 1:
+                for _ in range(mat_count * 3):
+                    slen = struct.unpack_from('<I', data, off)[0]; off += 4
+                    if slen > 0:
+                        name = data[off:off+slen*2].decode('utf-16-le')
+                        texture_names.append(name)
+                    off += slen * 2
+                off += 76  # material properties
+            else:
+                # flag=0: search for meshpoint anchor
+                for anchor in [b'C\x00e\x00n\x00t\x00e\x00r\x00',
+                              b'A\x00b\x00o\x00v\x00e\x00',
+                              b'E\x00x\x00h\x00a\x00u\x00s\x00t\x00',
+                              b'W\x00e\x00a\x00p\x00o\x00n\x00']:
+                    idx = data.find(anchor)
+                    if idx != -1:
+                        # Walk back: name starts at name_len(4) before the string
+                        # And mp_count(4) before that
+                        name_start = idx
+                        name_len_pos = name_start - 4
+                        slen = struct.unpack_from('<I', data, name_len_pos)[0]
+                        if slen * 2 == len(anchor) or slen > 0:
+                            off = name_len_pos - 4  # mp_count is before first name_len
+                        break
+
+            # Meshpoints
+            mp_count = struct.unpack_from('<I', data, off)[0]; off += 4
+            meshpoints = []
+            for _ in range(mp_count):
+                slen = struct.unpack_from('<I', data, off)[0]; off += 4
+                name = data[off:off+slen*2].decode('utf-16-le') if slen > 0 else ''
+                off += slen * 2
+                pos = struct.unpack_from('<3f', data, off); off += 12
+                rot = struct.unpack_from('<9f', data, off); off += 36
+                meshpoints.append({'name': name, 'position': pos, 'rotation': rot})
+
+            # Vertices
+            vert_count = struct.unpack_from('<I', data, off)[0]; off += 4
+            positions = []
+            normals_list = []
+            uvs_list = []
+            for _ in range(vert_count):
+                f_vals = struct.unpack_from('<17f', data, off); off += 68
+                positions.append(f_vals[0:3])
+                normals_list.append(f_vals[3:6])
+                uvs_list.append(f_vals[13:15])  # uv0
+
+            # Triangles
+            tri_count = struct.unpack_from('<I', data, off)[0]; off += 4
+            faces = []
+            for _ in range(tri_count):
+                tri = struct.unpack_from('<3I', data, off)
+                off += 16  # 3 indices + padding
+                faces.append(tri)
+
+            # --- Build Blender mesh ---
+            bpy.ops.object.select_all(action='SELECT')
+            bpy.ops.object.delete()
+
+            eid = entity_id or os.path.splitext(os.path.basename(mesh_path))[0]
+
+            # Game->Blender coordinate conversion (same as SoSE2: Y-up -> Z-up)
+            bl_verts = [(p[0], -p[2], p[1]) for p in positions]
+
+            mesh = bpy.data.meshes.new(eid)
+            mesh.from_pydata(bl_verts, [], list(faces))
+            mesh.update()
+
+            # Add UVs
+            if uvs_list:
+                uv_layer = mesh.uv_layers.new(name='UVMap')
+                for poly in mesh.polygons:
+                    for li, vi in zip(poly.loop_indices, poly.vertices):
+                        uv_layer.data[li].uv = uvs_list[vi]
+
+            obj = bpy.data.objects.new(eid, mesh)
+            bpy.context.collection.objects.link(obj)
+            bpy.context.view_layer.objects.active = obj
+            obj.select_set(True)
+            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+            obj.location = (0, 0, 0)
+
+            # Normalize
+            normalized = False
+            if normalize:
+                vs = [v.co for v in obj.data.vertices]
+                spans_raw = {ax: max(v[i] for v in vs) - min(v[i] for v in vs) for ax, i in [('X',0),('Y',1),('Z',2)]}
+                longest = max(spans_raw.values())
+                if longest > 0:
+                    import bmesh as bm_mod
+                    scale = 100.0 / longest
+                    bm = bm_mod.new()
+                    bm.from_mesh(obj.data)
+                    for v in bm.verts:
+                        v.co.x *= scale
+                        v.co.y *= scale
+                        v.co.z *= scale
+                    bm.to_mesh(obj.data)
+                    bm.free()
+                    obj.data.update()
+                    bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+                    obj.location = (0, 0, 0)
+                    normalized = True
+
+            # Meshpoints
+            mp_added = 0
+            if add_meshpoints and meshpoints:
+                for mp in meshpoints:
+                    gx, gy, gz = mp['position']
+                    empty = bpy.data.objects.new(mp['name'], None)
+                    empty.location = mathutils.Vector((gx, -gz, gy))
+                    empty.empty_display_type = 'ARROWS'
+                    empty.empty_display_size = 5.0
+                    if 'exhaust' in mp['name'].lower():
+                        empty.rotation_euler = (math.radians(90), 0, 0)
+                    bpy.context.collection.objects.link(empty)
+                    empty.parent = obj
+                    mp_added += 1
+
+            # Sun light
+            light_data = bpy.data.lights.new("Sun", 'SUN')
+            light_data.energy = 5.0
+            light_obj = bpy.data.objects.new("Sun", light_data)
+            light_obj.rotation_euler = (math.radians(45), 0, math.radians(45))
+            bpy.context.collection.objects.link(light_obj)
+
+            # Stats
+            vs = [v.co for v in obj.data.vertices]
+            spans = {}
+            for ax, i in [('X', 0), ('Y', 1), ('Z', 2)]:
+                vals = [v[i] for v in vs]
+                spans[ax] = round(max(vals) - min(vals), 1)
+
+            result = {
+                "success": True,
+                "entity_id": eid,
+                "source": "rebellion",
+                "vertices": vert_count,
+                "faces": tri_count,
+                "meshpoints": mp_added,
+                "materials": texture_names[:3] if texture_names else [],
+                "spans": spans,
+            }
+            if normalized:
+                result["normalized"] = True
+            return result
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return {"error": str(e)}
 
     def export_sins2_mesh(self, entity_id, copy_to_repo=True):
