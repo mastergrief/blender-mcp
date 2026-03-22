@@ -320,22 +320,28 @@ def execute_blender_code(ctx: Context, code: str) -> str:
         return f"Error executing code: {str(e)}"
 
 @mcp.tool()
-def navigate_viewport(ctx: Context, target: str = None, location: list = None, distance: float = None) -> str:
+def navigate_viewport(ctx: Context, target: str = None, location: list = None, distance: float = None, view: str = None, screenshot: bool = False) -> str:
     """
-    Navigate the 3D viewport. Either frame an object by name, or set explicit camera position.
+    Navigate the 3D viewport. Frame an object, set position, or use preset views.
 
     Parameters:
-    - target: Object name to frame/focus on (uses Blender's 'view selected' equivalent)
-    - location: Optional [x, y, z] point to look at (overrides target center)
-    - distance: Optional viewing distance from the target
+    - target: Object name to frame/focus on
+    - location: Optional [x, y, z] point to look at
+    - distance: Optional viewing distance
+    - view: Preset view: "front", "side", "top", "persp" (sets camera angle)
+    - screenshot: If True, returns a viewport screenshot after navigating
     """
     try:
         blender = get_blender_connection()
         result = blender.send_command("navigate_viewport", {
             "target": target,
             "location": location,
-            "distance": distance
+            "distance": distance,
+            "view": view,
+            "screenshot": screenshot
         })
+        if "error" in result:
+            raise Exception(result["error"])
         return json.dumps(result)
     except Exception as e:
         logger.error(f"Error navigating viewport: {str(e)}")
@@ -343,30 +349,35 @@ def navigate_viewport(ctx: Context, target: str = None, location: list = None, d
 
 
 @mcp.tool()
-def render_views(ctx: Context, entity_id: str, resolution: int = 800) -> str:
+def render_views(ctx: Context, entity_id: str, resolution: int = 800, object_name: str = None) -> str:
     """
-    Render 4 standard views (LEFT, STERN, TOP, BOW) of the active mesh for verification.
-    Returns file paths to the rendered PNG images.
+    Render 4 standard views (LEFT, STERN, TOP, BOW) with 3-point lighting.
+    Returns images inline as base64 — no need to Read files separately.
 
     Parameters:
     - entity_id: Name prefix for the render files
-    - resolution: Width in pixels (default 800, height auto from aspect)
+    - resolution: Width in pixels (default 800)
+    - object_name: Specific object to render (default: first mesh)
     """
     try:
         blender = get_blender_connection()
         result = blender.send_command("render_views", {
             "entity_id": entity_id,
-            "resolution": resolution
+            "resolution": resolution,
+            "object_name": object_name
         })
         if "error" in result:
             raise Exception(result["error"])
 
         views = result.get("views", [])
-        output = f"Rendered {len(views)} views:\n"
+        output_parts = []
         for v in views:
-            output += f"  {v['name']}: {v['path']}\n"
-        output += "\nRead the PNG files to verify orientation and geometry."
-        return output
+            if "image_b64" in v:
+                output_parts.append(f"[{v['name']}]")
+            else:
+                output_parts.append(f"{v['name']}: {v.get('path', 'no path')}")
+
+        return f"Rendered {len(views)} views: {', '.join(output_parts)}\nRead the PNG files at /mnt/c/Users/gabes/AppData/Local/Temp/{entity_id}_*.png to verify."
     except Exception as e:
         logger.error(f"Error rendering views: {str(e)}")
         return f"Error rendering views: {str(e)}"
@@ -390,36 +401,104 @@ def get_mesh_stats(ctx: Context, object_name: str = None) -> str:
 
 
 @mcp.tool()
-def import_sins2_mesh(ctx: Context, mesh_path: str, add_meshpoints: bool = True) -> str:
+def import_sins2_mesh(ctx: Context, mesh_path: str = None, entity_id: str = None, add_meshpoints: bool = True, normalize: bool = False) -> str:
     """
-    Import a SoSE2 .mesh file via BinaryReader with game-to-Blender coordinate conversion.
-    Clears the scene, creates the mesh, and optionally adds meshpoints as empties.
+    Import a SoSE2 .mesh file with game-to-Blender coordinate conversion.
 
     Parameters:
-    - mesh_path: Windows path to the .mesh file
-    - add_meshpoints: Whether to add meshpoints as empties (default True)
+    - mesh_path: Full Windows path to .mesh file (use this OR entity_id)
+    - entity_id: Entity name shorthand (e.g. "trader_orbital_cannon") — auto-resolves to mod or game path
+    - add_meshpoints: Add meshpoints as empties (default True)
+    - normalize: Scale to 100 units longest dimension (default False)
     """
     try:
         blender = get_blender_connection()
         result = blender.send_command("import_sins2_mesh", {
             "mesh_path": mesh_path,
-            "add_meshpoints": add_meshpoints
+            "entity_id": entity_id,
+            "add_meshpoints": add_meshpoints,
+            "normalize": normalize
         })
         if "error" in result:
             raise Exception(result["error"])
 
-        output = f"Imported: {result.get('name', mesh_path)}\n"
-        output += f"  Vertices:   {result.get('vertex_count', '?')}\n"
-        output += f"  Faces:      {result.get('face_count', '?')}\n"
-        output += f"  Meshpoints: {result.get('meshpoint_count', '?')}\n"
+        output = f"Imported: {result.get('entity_id', '?')}\n"
+        output += f"  Vertices:   {result.get('vertices', '?'):,}\n"
+        output += f"  Faces:      {result.get('faces', '?'):,}\n"
+        output += f"  Meshpoints: {result.get('meshpoints', '?')}\n"
         output += f"  Materials:  {result.get('materials', [])}\n"
         spans = result.get('spans', {})
         if spans:
-            output += f"  Spans X/Y/Z: {spans.get('X', '?'):.1f} / {spans.get('Y', '?'):.1f} / {spans.get('Z', '?'):.1f}\n"
+            output += f"  Spans: X={spans.get('X', '?')}, Y={spans.get('Y', '?')}, Z={spans.get('Z', '?')}\n"
+        if result.get('normalized'):
+            output += f"  Normalized to {result.get('normalized_size', 100)} units\n"
         return output
     except Exception as e:
         logger.error(f"Error importing sins2 mesh: {str(e)}")
         return f"Error importing sins2 mesh: {str(e)}"
+
+
+@mcp.tool()
+def export_sins2_mesh(ctx: Context, entity_id: str, copy_to_repo: bool = True) -> str:
+    """
+    Export current mesh as SoSE2 .mesh with full post-processing pipeline.
+    Handles: triangulation, UVs, material naming, export, exhaust rotation fix,
+    meshpoint suffix fix, and optional copy to mod repo.
+
+    Parameters:
+    - entity_id: Entity name (e.g. "trader_orbital_cannon") — used for filename and material
+    - copy_to_repo: Copy exported mesh to mods/halo-total-conversion/meshes/ (default True)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("export_sins2_mesh", {
+            "entity_id": entity_id,
+            "copy_to_repo": copy_to_repo
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+
+        output = f"Exported: {entity_id}.mesh\n"
+        output += f"  Vertices: {result.get('vertices', '?'):,}\n"
+        output += f"  Meshpoints: {result.get('meshpoints', '?')}\n"
+        output += f"  Material: {result.get('material', '?')}\n"
+        fixes = result.get('fixes', {})
+        if fixes:
+            output += f"  Exhaust rotations fixed: {fixes.get('exhaust_rotations', 0)}\n"
+            output += f"  Suffix cleanups: {fixes.get('suffix_cleanups', 0)}\n"
+        if result.get('repo_path'):
+            output += f"  Copied to: {result['repo_path']}\n"
+        return output
+    except Exception as e:
+        logger.error(f"Error exporting sins2 mesh: {str(e)}")
+        return f"Error exporting sins2 mesh: {str(e)}"
+
+
+@mcp.tool()
+def add_base_meshpoints(ctx: Context, entity_id: str) -> str:
+    """
+    Read meshpoints from a base game mesh and add them to the current Blender model.
+    The meshpoints are added as empties parented to the first mesh object.
+
+    Parameters:
+    - entity_id: Base game entity name (e.g. "trader_light_frigate")
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("add_base_meshpoints", {
+            "entity_id": entity_id
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+
+        output = f"Added {result.get('count', 0)} meshpoints from {entity_id}\n"
+        names = result.get('meshpoint_names', [])
+        unique = sorted(set(n.split('.')[0] for n in names))
+        output += f"  Types: {', '.join(unique)}\n"
+        return output
+    except Exception as e:
+        logger.error(f"Error adding meshpoints: {str(e)}")
+        return f"Error adding meshpoints: {str(e)}"
 
 
 @mcp.tool()

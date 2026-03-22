@@ -210,6 +210,8 @@ class BlenderMCPServer:
             "render_views": self.render_views,
             "get_mesh_stats": self.get_mesh_stats,
             "import_sins2_mesh": self.import_sins2_mesh,
+            "export_sins2_mesh": self.export_sins2_mesh,
+            "add_base_meshpoints": self.add_base_meshpoints,
         }
 
         # Add Sketchfab handlers only if enabled
@@ -467,8 +469,9 @@ class BlenderMCPServer:
         except Exception as e:
             raise Exception(f"Code execution error: {str(e)}")
 
-    def navigate_viewport(self, target=None, location=None, distance=None):
-        """Navigate the 3D viewport to frame an object or look at a point."""
+    def navigate_viewport(self, target=None, location=None, distance=None, view=None, screenshot=False):
+        """Navigate the 3D viewport with preset views and optional screenshot."""
+        import math
         try:
             area = None
             for a in bpy.context.screen.areas:
@@ -480,19 +483,17 @@ class BlenderMCPServer:
 
             r3d = area.spaces[0].region_3d
 
+            # Frame target object
             if target:
                 obj = bpy.data.objects.get(target)
                 if not obj:
                     return {"error": f"Object '{target}' not found"}
-
-                # Calculate bounding box center and size in world space
                 bbox_corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
                 center = sum(bbox_corners, mathutils.Vector()) / 8
                 max_dim = max(
                     max(c[i] for c in bbox_corners) - min(c[i] for c in bbox_corners)
                     for i in range(3)
                 )
-
                 r3d.view_location = center
                 if distance is None:
                     r3d.view_distance = max_dim * 2.0
@@ -505,24 +506,48 @@ class BlenderMCPServer:
             elif distance is not None:
                 r3d.view_distance = distance
 
-            return {
+            # Apply preset view rotation
+            if view:
+                from mathutils import Quaternion
+                presets = {
+                    "front": Quaternion((0.7071, 0.7071, 0, 0)),
+                    "side": Quaternion((0.5, 0.5, -0.5, -0.5)),
+                    "top": Quaternion((1, 0, 0, 0)),
+                    "persp": Quaternion((0.8, 0.5, -0.15, -0.2)).normalized(),
+                }
+                q = presets.get(view)
+                if q:
+                    r3d.view_rotation = q
+                    r3d.view_perspective = 'PERSP'
+
+            result = {
                 "success": True,
                 "view_location": list(r3d.view_location),
                 "view_distance": r3d.view_distance
             }
+
+            # Optional screenshot
+            if screenshot:
+                ss = self.get_viewport_screenshot(max_size=800)
+                if "image_b64" in ss:
+                    result["image_b64"] = ss["image_b64"]
+
+            return result
         except Exception as e:
             return {"error": str(e)}
 
-    def render_views(self, entity_id="render", resolution=800):
-        """Render 4 standard views (LEFT, STERN, TOP, BOW) of the scene."""
+    def render_views(self, entity_id="render", resolution=800, object_name=None):
+        """Render 4 standard views with 3-point lighting."""
         import math
         try:
-            # Find the mesh object
             obj = None
-            for o in bpy.data.objects:
-                if o.type == 'MESH':
-                    obj = o
-                    break
+            if object_name:
+                obj = bpy.data.objects.get(object_name)
+            if not obj:
+                for o in bpy.data.objects:
+                    if o.type == 'MESH':
+                        obj = o
+                        break
             if not obj:
                 return {"error": "No mesh object in scene"}
 
@@ -531,37 +556,52 @@ class BlenderMCPServer:
             scene.render.resolution_x = resolution
             scene.render.resolution_y = int(resolution * 0.75)
 
-            # Ensure lighting exists
-            has_light = any(o.type == 'LIGHT' for o in bpy.data.objects)
-            temp_light = None
-            if not has_light:
-                light_data = bpy.data.lights.new("_render_sun", 'SUN')
-                light_data.energy = 5.0
-                temp_light = bpy.data.objects.new("_render_sun", light_data)
-                temp_light.rotation_euler = (math.radians(45), 0, math.radians(45))
-                bpy.context.collection.objects.link(temp_light)
+            # 3-point lighting setup
+            temp_lights = []
+            existing_lights = [o for o in bpy.data.objects if o.type == 'LIGHT']
+            if not existing_lights:
+                # Key light (main, warm)
+                key_data = bpy.data.lights.new("_key_light", 'SUN')
+                key_data.energy = 5.0
+                key_obj = bpy.data.objects.new("_key_light", key_data)
+                key_obj.rotation_euler = (math.radians(50), 0, math.radians(30))
+                bpy.context.collection.objects.link(key_obj)
+                temp_lights.append(key_obj)
 
-            # Ensure world background
+                # Fill light (softer, opposite side)
+                fill_data = bpy.data.lights.new("_fill_light", 'SUN')
+                fill_data.energy = 2.5
+                fill_obj = bpy.data.objects.new("_fill_light", fill_data)
+                fill_obj.rotation_euler = (math.radians(40), 0, math.radians(-120))
+                bpy.context.collection.objects.link(fill_obj)
+                temp_lights.append(fill_obj)
+
+                # Rim light (behind, highlights silhouette)
+                rim_data = bpy.data.lights.new("_rim_light", 'SUN')
+                rim_data.energy = 3.0
+                rim_obj = bpy.data.objects.new("_rim_light", rim_data)
+                rim_obj.rotation_euler = (math.radians(20), 0, math.radians(160))
+                bpy.context.collection.objects.link(rim_obj)
+                temp_lights.append(rim_obj)
+
+            # World background
             if not scene.world:
                 scene.world = bpy.data.worlds.new("World")
             scene.world.use_nodes = True
             bg = scene.world.node_tree.nodes.get("Background")
             if bg:
-                bg.inputs[0].default_value = (0.15, 0.15, 0.15, 1.0)
+                bg.inputs[0].default_value = (0.12, 0.12, 0.14, 1.0)
 
-            # Get bounding box for camera distance
+            # Bounding box in world space
             vs = [obj.matrix_world @ v.co for v in obj.data.vertices]
-            max_dim = max(
-                max(v[i] for v in vs) - min(v[i] for v in vs) for i in range(3)
-            )
             center = mathutils.Vector((
                 (max(v.x for v in vs) + min(v.x for v in vs)) / 2,
                 (max(v.y for v in vs) + min(v.y for v in vs)) / 2,
                 (max(v.z for v in vs) + min(v.z for v in vs)) / 2,
             ))
+            max_dim = max(max(v[i] for v in vs) - min(v[i] for v in vs) for i in range(3))
             dist = max_dim * 1.8
 
-            # Create temp camera
             cam_data = bpy.data.cameras.new("_render_cam")
             cam_data.clip_end = max_dim * 10
             cam_data.lens = 50
@@ -569,7 +609,6 @@ class BlenderMCPServer:
             bpy.context.collection.objects.link(cam_obj)
             scene.camera = cam_obj
 
-            # 4 standard views: LEFT (bow on left), STERN (engines face cam), TOP, BOW
             views_config = {
                 "LEFT": {"offset": (dist, 0, 0), "rot": (math.radians(90), 0, math.radians(90))},
                 "STERN": {"offset": (0, dist, 0), "rot": (math.radians(90), 0, math.radians(180))},
@@ -584,7 +623,7 @@ class BlenderMCPServer:
                 cam_obj.location = (
                     center.x + cfg["offset"][0],
                     center.y + cfg["offset"][1],
-                    center.z + cfg["offset"][2]
+                    center.z + cfg["offset"][2],
                 )
                 cam_obj.rotation_euler = cfg["rot"]
 
@@ -593,17 +632,22 @@ class BlenderMCPServer:
                 scene.render.image_settings.file_format = 'PNG'
                 bpy.ops.render.render(write_still=True)
 
+                # Convert Windows path to WSL path for the result
+                wsl_path = filepath.replace("\\", "/")
+                if wsl_path.startswith("C:"):
+                    wsl_path = "/mnt/c" + wsl_path[2:]
+
                 rendered.append({
                     "name": name,
-                    "path": filepath.replace("\\", "/").replace("C:/Users", "/mnt/c/Users")
+                    "path": wsl_path,
                 })
 
-            # Cleanup temp objects
+            # Cleanup
             bpy.data.objects.remove(cam_obj)
             bpy.data.cameras.remove(cam_data)
-            if temp_light:
-                light_data_ref = temp_light.data
-                bpy.data.objects.remove(temp_light)
+            for light_obj in temp_lights:
+                light_data_ref = light_obj.data
+                bpy.data.objects.remove(light_obj)
                 bpy.data.lights.remove(light_data_ref)
 
             return {"success": True, "views": rendered}
@@ -660,10 +704,27 @@ class BlenderMCPServer:
         except Exception as e:
             return {"error": str(e)}
 
-    def import_sins2_mesh(self, mesh_path, add_meshpoints=True):
-        """Import a SoSE2 .mesh file via BinaryReader."""
+    def import_sins2_mesh(self, mesh_path=None, entity_id=None, add_meshpoints=True, normalize=False):
+        """Import a SoSE2 .mesh file. Accepts full path or entity_id shorthand."""
         import math, sys
         try:
+            # Resolve mesh path from entity_id if needed
+            if not mesh_path and entity_id:
+                # Check mod path first, then base game
+                candidates = [
+                    rf"C:\Users\gabes\AppData\Local\sins2\mods\halo-total-conversion\meshes\{entity_id}.mesh",
+                    rf"C:\Program Files (x86)\Steam\steamapps\common\Sins2\meshes\{entity_id}.mesh",
+                ]
+                for c in candidates:
+                    if os.path.exists(c):
+                        mesh_path = c
+                        break
+                if not mesh_path:
+                    return {"error": f"Could not find mesh for '{entity_id}' in mod or game paths"}
+
+            if not mesh_path:
+                return {"error": "Provide mesh_path or entity_id"}
+
             # Clear scene
             bpy.ops.object.select_all(action='SELECT')
             bpy.ops.object.delete()
@@ -676,34 +737,53 @@ class BlenderMCPServer:
 
             md = BinaryReader.initialize_from(mesh_file=mesh_path).mesh_data
 
-            # Build mesh with game→blender coordinate conversion
             verts = [(v['p'][0], -v['p'][2], v['p'][1]) for v in md['vertices']]
             faces = [(md['indices'][i], md['indices'][i+1], md['indices'][i+2])
                      for i in range(0, len(md['indices']), 3)]
 
-            # Extract entity name from path
-            entity_id = os.path.splitext(os.path.basename(mesh_path))[0]
+            eid = entity_id or os.path.splitext(os.path.basename(mesh_path))[0]
 
-            mesh = bpy.data.meshes.new(entity_id)
+            mesh = bpy.data.meshes.new(eid)
             mesh.from_pydata(verts, [], faces)
             mesh.update()
 
-            obj = bpy.data.objects.new(entity_id, mesh)
+            obj = bpy.data.objects.new(eid, mesh)
             bpy.context.collection.objects.link(obj)
 
-            # Center origin
             bpy.context.view_layer.objects.active = obj
             obj.select_set(True)
             bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
             obj.location = (0, 0, 0)
 
-            # Add meshpoints as empties
+            # Normalize scale if requested
+            normalized = False
+            if normalize:
+                import bmesh as bm_mod
+                vs_list = [v.co for v in obj.data.vertices]
+                spans = {ax: max(v[i] for v in vs_list) - min(v[i] for v in vs_list) for ax, i in [('X',0),('Y',1),('Z',2)]}
+                longest = max(spans.values())
+                if longest > 0:
+                    scale = 100.0 / longest
+                    bm = bm_mod.new()
+                    bm.from_mesh(obj.data)
+                    for v in bm.verts:
+                        v.co.x *= scale
+                        v.co.y *= scale
+                        v.co.z *= scale
+                    bm.to_mesh(obj.data)
+                    bm.free()
+                    obj.data.update()
+                    bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+                    obj.location = (0, 0, 0)
+                    normalized = True
+
+            # Add meshpoints
             mp_count = 0
             if add_meshpoints and md.get('meshpoints'):
                 for mp in md['meshpoints']:
                     gx, gy, gz = mp['position']
                     empty = bpy.data.objects.new(mp['name'], None)
-                    empty.location = mathutils.Vector((gx, -gz, gy))  # game→blender
+                    empty.location = mathutils.Vector((gx, -gz, gy))
                     empty.empty_display_type = 'ARROWS'
                     empty.empty_display_size = 5.0
                     if 'exhaust' in mp['name']:
@@ -720,20 +800,215 @@ class BlenderMCPServer:
             bpy.context.collection.objects.link(light_obj)
 
             # Calculate spans
-            vs = [v.co for v in obj.data.vertices]
+            vs_final = [v.co for v in obj.data.vertices]
             spans = {}
             for ax, i in [('X', 0), ('Y', 1), ('Z', 2)]:
-                vals = [v[i] for v in vs]
+                vals = [v[i] for v in vs_final]
                 spans[ax] = round(max(vals) - min(vals), 1)
 
-            return {
+            result = {
                 "success": True,
-                "entity_id": entity_id,
+                "entity_id": eid,
                 "vertices": len(md['vertices']),
                 "faces": len(md['indices']) // 3,
                 "meshpoints": mp_count,
                 "materials": md.get('materials', []),
                 "spans": spans
+            }
+            if normalized:
+                result["normalized"] = True
+                result["normalized_size"] = 100
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def export_sins2_mesh(self, entity_id, copy_to_repo=True):
+        """Export current mesh as SoSE2 .mesh with full post-processing."""
+        import struct, sys
+        try:
+            obj = None
+            for o in bpy.data.objects:
+                if o.type == 'MESH':
+                    obj = o
+                    break
+            if not obj:
+                return {"error": "No mesh object in scene"}
+
+            bpy.context.view_layer.objects.active = obj
+            obj.select_set(True)
+
+            # Ensure material name matches entity_id
+            if not obj.data.materials:
+                mat = bpy.data.materials.new(entity_id)
+                obj.data.materials.append(mat)
+            else:
+                obj.data.materials[0].name = entity_id
+
+            # Ensure UVs exist
+            if not obj.data.uv_layers:
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.uv.smart_project(angle_limit=66, island_margin=0.02)
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+            # Ensure triangulated
+            import bmesh
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            non_tris = [f for f in bm.faces if len(f.verts) != 3]
+            if non_tris:
+                bmesh.ops.triangulate(bm, faces=non_tris)
+                bm.to_mesh(obj.data)
+            bm.free()
+
+            # Select mesh + all child empties
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            for child in obj.children:
+                child.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+
+            # Export
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            export_path = os.path.join(temp_dir, entity_id)
+            bpy.ops.sinsii.export_mesh(filepath=export_path, skip_meshpoint_validation=True)
+
+            mesh_path = export_path + ".mesh"
+            if not os.path.exists(mesh_path):
+                return {"error": f"Export failed — {mesh_path} not created"}
+
+            # Post-processing: fix exhaust rotations + meshpoint suffixes
+            ext_path = r"C:\Users\gabes\AppData\Roaming\Blender Foundation\Blender\5.0\scripts\addons\sins2_blender_extension"
+            if ext_path not in sys.path:
+                sys.path.insert(0, ext_path)
+            from src.lib.binary_reader import BinaryReader
+
+            md = BinaryReader.initialize_from(mesh_file=mesh_path).mesh_data
+
+            with open(mesh_path, 'rb') as f:
+                data = bytearray(f.read())
+
+            # Find meshpoints section
+            first_name = md['meshpoints'][0]['name'].encode('utf-8')
+            idx = data.find(struct.pack('<I', len(first_name)) + first_name)
+            section_start = idx - 8
+
+            pos = idx
+            for mp in md['meshpoints']:
+                name_len = struct.unpack_from('<I', data, pos)[0]
+                pos += 4 + name_len + 12 + 36 + 2
+            section_end = pos
+
+            CORRECT_EXHAUST_ROT = struct.pack('<9f', -1, 0, 0, 0, 1, 0, 0, 0, -1)
+            new_mp_data = bytearray()
+            exhaust_fixes = 0
+            suffix_fixes = 0
+
+            CORRECT = [-1, 0, 0, 0, 1, 0, 0, 0, -1]
+
+            for mp in md['meshpoints']:
+                name = mp['name']
+                # Fix .00x suffixes
+                if '.00' in name and not name.startswith('exhaust') and not name.startswith('child'):
+                    name = name.split('.00')[0]
+                    suffix_fixes += 1
+                elif name.startswith('exhaust.') and len(name) > 9 and name[8] == '0':
+                    name = f"exhaust.{int(name[8:])}"
+                    suffix_fixes += 1
+
+                name_bytes = name.encode('utf-8')
+                new_mp_data += struct.pack('<I', len(name_bytes)) + name_bytes
+                new_mp_data += struct.pack('<3f', *mp['position'])
+
+                if 'exhaust' in name:
+                    ok = all(abs(mp['rotation'][i] - CORRECT[i]) < 0.01 for i in range(9))
+                    if not ok:
+                        exhaust_fixes += 1
+                    new_mp_data += CORRECT_EXHAUST_ROT
+                else:
+                    new_mp_data += struct.pack('<9f', *mp['rotation'])
+                new_mp_data += struct.pack('<H', mp['bone_index'])
+
+            new_section = struct.pack('<I', len(md['meshpoints'])) + b'\x00' * 4 + new_mp_data
+            new_data = data[:section_start] + new_section + data[section_end:]
+
+            with open(mesh_path, 'wb') as f:
+                f.write(new_data)
+
+            # Copy to repo if requested
+            repo_path = None
+            if copy_to_repo:
+                import shutil
+                repo_dest = rf"C:\Users\gabes\projects\sins2-modpack\mods\halo-total-conversion\meshes\{entity_id}.mesh"
+                # Use WSL path since we might be on Windows or WSL
+                shutil.copy2(mesh_path, repo_dest)
+                repo_path = f"mods/halo-total-conversion/meshes/{entity_id}.mesh"
+
+            return {
+                "success": True,
+                "vertices": len(md['vertices']),
+                "meshpoints": len(md['meshpoints']),
+                "material": entity_id,
+                "fixes": {
+                    "exhaust_rotations": exhaust_fixes,
+                    "suffix_cleanups": suffix_fixes
+                },
+                "repo_path": repo_path
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def add_base_meshpoints(self, entity_id):
+        """Read meshpoints from base game mesh and add to current model."""
+        import math, sys
+        try:
+            # Find base game mesh
+            base_path = rf"C:\Program Files (x86)\Steam\steamapps\common\Sins2\meshes\{entity_id}.mesh"
+            if not os.path.exists(base_path):
+                return {"error": f"Base game mesh not found: {base_path}"}
+
+            ext_path = r"C:\Users\gabes\AppData\Roaming\Blender Foundation\Blender\5.0\scripts\addons\sins2_blender_extension"
+            if ext_path not in sys.path:
+                sys.path.insert(0, ext_path)
+            from src.lib.binary_reader import BinaryReader
+
+            md = BinaryReader.initialize_from(mesh_file=base_path).mesh_data
+
+            # Find the mesh object to parent to
+            obj = None
+            for o in bpy.data.objects:
+                if o.type == 'MESH':
+                    obj = o
+                    break
+            if not obj:
+                return {"error": "No mesh object in scene to parent meshpoints to"}
+
+            # Remove existing empties (old meshpoints)
+            for child in list(obj.children):
+                if child.type == 'EMPTY':
+                    bpy.data.objects.remove(child, do_unlink=True)
+
+            # Add meshpoints from base game
+            names = []
+            for mp in md['meshpoints']:
+                gx, gy, gz = mp['position']
+                empty = bpy.data.objects.new(mp['name'], None)
+                empty.location = mathutils.Vector((gx, -gz, gy))
+                empty.empty_display_type = 'ARROWS'
+                empty.empty_display_size = 5.0
+                if 'exhaust' in mp['name']:
+                    empty.rotation_euler = (math.radians(90), 0, 0)
+                bpy.context.collection.objects.link(empty)
+                empty.parent = obj
+                names.append(mp['name'])
+
+            return {
+                "success": True,
+                "count": len(names),
+                "meshpoint_names": names
             }
         except Exception as e:
             return {"error": str(e)}
