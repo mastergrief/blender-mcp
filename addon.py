@@ -447,11 +447,20 @@ class BlenderMCPServer:
         """Execute arbitrary Blender Python code"""
         # This is powerful but potentially dangerous - use with caution
         try:
+            # Safety: block subdivide on large meshes (causes OOM crashes)
+            if 'subdivide' in code.lower():
+                total_verts = sum(len(o.data.vertices) for o in bpy.data.objects if o.type == 'MESH')
+                if total_verts > 15000:
+                    raise Exception(
+                        f"BLOCKED: subdivide on {total_verts:,} verts would produce ~{total_verts*4:,} verts. "
+                        f"Use selective subdivision on specific faces, or add detail via separate objects instead."
+                    )
+
             # Auto-load helper scripts on first call
             self._load_autoload_scripts()
 
-            # Create namespace with bpy + persistent helpers
-            namespace = {"bpy": bpy}
+            # Create namespace with bpy + persistent helpers + budget constant
+            namespace = {"bpy": bpy, "VERT_BUDGET": 50000}
             namespace.update(BlenderMCPServer._persistent_ns)
 
             # Capture stdout during execution, and return it as result
