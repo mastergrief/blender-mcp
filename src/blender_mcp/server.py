@@ -382,6 +382,129 @@ def render_views(ctx: Context, entity_id: str, resolution: int = 800, object_nam
 
 
 @mcp.tool()
+def render_closeup(ctx: Context, location: list, radius: float = 500, resolution: int = 800, entity_id: str = "closeup") -> str:
+    """
+    Render a close-up view at a specific location on the model.
+    Useful for verifying detail placement on specific areas.
+
+    Parameters:
+    - location: [x, y, z] center point to focus on
+    - radius: How close to zoom in (smaller = closer, default 500)
+    - resolution: Image width in pixels (default 800)
+    - entity_id: Filename prefix (default "closeup")
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("render_closeup", {
+            "location": location,
+            "radius": radius,
+            "resolution": resolution,
+            "entity_id": entity_id,
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+        path = result.get("path", "")
+        return f"Close-up rendered: {path}\nCenter: {location}, Radius: {radius}"
+    except Exception as e:
+        logger.error(f"Error rendering closeup: {str(e)}")
+        return f"Error rendering closeup: {str(e)}"
+
+
+@mcp.tool()
+def render_wireframe(ctx: Context, entity_id: str = "wireframe", resolution: int = 800) -> str:
+    """
+    Render the model with wireframe overlay to see mesh topology and detect floating geometry.
+
+    Parameters:
+    - entity_id: Filename prefix (default "wireframe")
+    - resolution: Image width (default 800)
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("render_wireframe", {
+            "entity_id": entity_id,
+            "resolution": resolution,
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+        path = result.get("path", "")
+        return f"Wireframe rendered: {path}"
+    except Exception as e:
+        logger.error(f"Error rendering wireframe: {str(e)}")
+        return f"Error rendering wireframe: {str(e)}"
+
+
+@mcp.tool()
+def render_cross_section(ctx: Context, axis: str = "Y", position: float = 0, entity_id: str = "section", resolution: int = 800) -> str:
+    """
+    Render a cross-section view by temporarily hiding geometry on one side of a cutting plane.
+    Shows the internal profile and where greebles attach.
+
+    Parameters:
+    - axis: Axis to slice along ("X", "Y", or "Z", default "Y")
+    - position: Position along the axis to cut at (default 0 = center)
+    - entity_id: Filename prefix
+    - resolution: Image width
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("render_cross_section", {
+            "axis": axis,
+            "position": position,
+            "entity_id": entity_id,
+            "resolution": resolution,
+        })
+        if "error" in result:
+            raise Exception(result["error"])
+        path = result.get("path", "")
+        return f"Cross-section rendered: {path}\nSliced at {axis}={position}"
+    except Exception as e:
+        logger.error(f"Error rendering cross section: {str(e)}")
+        return f"Error rendering cross section: {str(e)}"
+
+
+@mcp.tool()
+def verify_placement(ctx: Context, location: list = None, target: str = None, view: str = "persp") -> Image:
+    """
+    Quick verification screenshot: navigate viewport to a location/object, then capture.
+    Combines navigate_viewport + get_viewport_screenshot in one call.
+
+    Parameters:
+    - location: [x, y, z] point to look at
+    - target: Object name to frame (overrides location)
+    - view: Preset view angle: "front", "side", "top", "persp" (default "persp")
+    """
+    try:
+        blender = get_blender_connection()
+
+        # Navigate first
+        nav_params = {"view": view}
+        if target:
+            nav_params["target"] = target
+        elif location:
+            nav_params["location"] = location
+        blender.send_command("navigate_viewport", nav_params)
+
+        # Then screenshot
+        result = blender.send_command("get_viewport_screenshot", {
+            "max_size": 800,
+            "format": "png"
+        })
+
+        if "error" in result:
+            raise Exception(result["error"])
+
+        if "image_b64" in result:
+            image_bytes = base64.b64decode(result["image_b64"])
+            return Image(data=image_bytes, format="png")
+
+        raise Exception("No image data in response")
+    except Exception as e:
+        logger.error(f"Error in verify_placement: {str(e)}")
+        raise Exception(f"Verification failed: {str(e)}")
+
+
+@mcp.tool()
 def get_mesh_stats(ctx: Context, object_name: str = None) -> str:
     """
     Get mesh statistics: vertex/face count, meshpoints, materials, bounding box spans.

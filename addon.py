@@ -208,6 +208,9 @@ class BlenderMCPServer:
             "get_sketchfab_status": self.get_sketchfab_status,
             "navigate_viewport": self.navigate_viewport,
             "render_views": self.render_views,
+            "render_closeup": self.render_closeup,
+            "render_wireframe": self.render_wireframe,
+            "render_cross_section": self.render_cross_section,
             "get_mesh_stats": self.get_mesh_stats,
             "import_sins2_mesh": self.import_sins2_mesh,
             "export_sins2_mesh": self.export_sins2_mesh,
@@ -803,6 +806,250 @@ class BlenderMCPServer:
 
             return {"success": True, "views": rendered}
         except Exception as e:
+            return {"error": str(e)}
+
+    def render_closeup(self, location, radius=500, resolution=800, entity_id="closeup"):
+        """Render a close-up from a 3/4 angle around a point."""
+        import math
+        try:
+            scene = bpy.context.scene
+            scene.render.engine = 'BLENDER_EEVEE'
+            scene.render.resolution_x = resolution
+            scene.render.resolution_y = resolution
+
+            # Ensure lighting
+            if not any(o.type == 'LIGHT' for o in bpy.data.objects):
+                for name, energy, rot in [
+                    ("_key", 5.0, (math.radians(50), 0, math.radians(30))),
+                    ("_fill", 2.5, (math.radians(40), 0, math.radians(-120))),
+                    ("_back", 4.0, (math.radians(130), 0, 0)),
+                ]:
+                    d = bpy.data.lights.new(name, 'SUN')
+                    d.energy = energy
+                    o = bpy.data.objects.new(name, d)
+                    o.rotation_euler = rot
+                    bpy.context.collection.objects.link(o)
+
+            if not scene.world:
+                scene.world = bpy.data.worlds.new("World")
+            scene.world.use_nodes = True
+            bg = scene.world.node_tree.nodes.get("Background")
+            if bg:
+                bg.inputs[0].default_value = (0.12, 0.12, 0.14, 1.0)
+
+            center = mathutils.Vector(location)
+            dist = radius * 2.0
+
+            cam_data = bpy.data.cameras.new("_closeup_cam")
+            cam_data.clip_end = dist * 10
+            cam_data.lens = 50
+            cam_obj = bpy.data.objects.new("_closeup_cam", cam_data)
+            bpy.context.collection.objects.link(cam_obj)
+            scene.camera = cam_obj
+
+            # Render from a 3/4 angle looking at the center point
+            cam_obj.location = (
+                center.x + dist * 0.7,
+                center.y - dist * 0.5,
+                center.z + dist * 0.4,
+            )
+            direction = center - cam_obj.location
+            cam_obj.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+            filepath = os.path.join(tempfile.gettempdir(), f"{entity_id}_closeup.png")
+            scene.render.filepath = filepath
+            scene.render.image_settings.file_format = 'PNG'
+            bpy.ops.render.render(write_still=True)
+
+            bpy.data.objects.remove(cam_obj)
+            bpy.data.cameras.remove(cam_data)
+
+            wsl_path = filepath.replace("\\", "/")
+            if wsl_path.startswith("C:"):
+                wsl_path = "/mnt/c" + wsl_path[2:]
+
+            return {"success": True, "path": wsl_path}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def render_wireframe(self, entity_id="wireframe", resolution=800):
+        """Render with wireframe overlay from perspective view."""
+        import math
+        try:
+            obj = None
+            for o in bpy.data.objects:
+                if o.type == 'MESH':
+                    obj = o
+                    break
+            if not obj:
+                return {"error": "No mesh object in scene"}
+
+            scene = bpy.context.scene
+            scene.render.engine = 'BLENDER_EEVEE'
+            scene.render.resolution_x = resolution
+            scene.render.resolution_y = int(resolution * 0.75)
+
+            # Enable wireframe overlay on the object
+            obj.show_wire = True
+            obj.show_all_edges = True
+
+            # Ensure lighting
+            if not any(o.type == 'LIGHT' for o in bpy.data.objects):
+                d = bpy.data.lights.new("_wire_sun", 'SUN')
+                d.energy = 5.0
+                o = bpy.data.objects.new("_wire_sun", d)
+                o.rotation_euler = (math.radians(45), 0, math.radians(45))
+                bpy.context.collection.objects.link(o)
+
+            if not scene.world:
+                scene.world = bpy.data.worlds.new("World")
+            scene.world.use_nodes = True
+            bg = scene.world.node_tree.nodes.get("Background")
+            if bg:
+                bg.inputs[0].default_value = (0.12, 0.12, 0.14, 1.0)
+
+            # Camera setup
+            vs = [obj.matrix_world @ v.co for v in obj.data.vertices]
+            center = mathutils.Vector((
+                (max(v.x for v in vs) + min(v.x for v in vs)) / 2,
+                (max(v.y for v in vs) + min(v.y for v in vs)) / 2,
+                (max(v.z for v in vs) + min(v.z for v in vs)) / 2,
+            ))
+            max_dim = max(max(v[i] for v in vs) - min(v[i] for v in vs) for i in range(3))
+            dist = max_dim * 1.8
+
+            cam_data = bpy.data.cameras.new("_wire_cam")
+            cam_data.clip_end = max_dim * 10
+            cam_obj = bpy.data.objects.new("_wire_cam", cam_data)
+            bpy.context.collection.objects.link(cam_obj)
+            scene.camera = cam_obj
+
+            cam_obj.location = (center.x + dist*0.7, center.y - dist*0.5, center.z + dist*0.4)
+            direction = center - cam_obj.location
+            cam_obj.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+            filepath = os.path.join(tempfile.gettempdir(), f"{entity_id}_wireframe.png")
+            scene.render.filepath = filepath
+            scene.render.image_settings.file_format = 'PNG'
+            bpy.ops.render.render(write_still=True)
+
+            # Cleanup
+            obj.show_wire = False
+            obj.show_all_edges = False
+            bpy.data.objects.remove(cam_obj)
+            bpy.data.cameras.remove(cam_data)
+
+            wsl_path = filepath.replace("\\", "/")
+            if wsl_path.startswith("C:"):
+                wsl_path = "/mnt/c" + wsl_path[2:]
+
+            return {"success": True, "path": wsl_path}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def render_cross_section(self, axis="Y", position=0, entity_id="section", resolution=800):
+        """Render cross-section by using a boolean modifier with a temporary cutting plane."""
+        import math
+        try:
+            obj = None
+            for o in bpy.data.objects:
+                if o.type == 'MESH' and not o.name.startswith('_'):
+                    obj = o
+                    break
+            if not obj:
+                return {"error": "No mesh object in scene"}
+
+            scene = bpy.context.scene
+            scene.render.engine = 'BLENDER_EEVEE'
+            scene.render.resolution_x = resolution
+            scene.render.resolution_y = int(resolution * 0.75)
+
+            # Ensure lighting + background
+            if not any(o.type == 'LIGHT' for o in bpy.data.objects):
+                d = bpy.data.lights.new("_sec_sun", 'SUN')
+                d.energy = 5.0
+                o = bpy.data.objects.new("_sec_sun", d)
+                o.rotation_euler = (math.radians(45), 0, math.radians(45))
+                bpy.context.collection.objects.link(o)
+            if not scene.world:
+                scene.world = bpy.data.worlds.new("World")
+            scene.world.use_nodes = True
+            bg = scene.world.node_tree.nodes.get("Background")
+            if bg:
+                bg.inputs[0].default_value = (0.12, 0.12, 0.14, 1.0)
+
+            # Create a large cutting plane
+            vs = [obj.matrix_world @ v.co for v in obj.data.vertices]
+            max_dim = max(max(v[i] for v in vs) - min(v[i] for v in vs) for i in range(3))
+            plane_size = max_dim * 2
+
+            bpy.ops.mesh.primitive_cube_add(size=plane_size)
+            cutter = bpy.context.active_object
+            cutter.name = "_cutter"
+
+            # Position the cutter so one face aligns with the slice plane
+            axis_idx = {"X": 0, "Y": 1, "Z": 2}.get(axis.upper(), 1)
+            loc = [0, 0, 0]
+            loc[axis_idx] = position + plane_size / 2
+            cutter.location = loc
+
+            # Add boolean modifier (DIFFERENCE)
+            bpy.context.view_layer.objects.active = obj
+            mod = obj.modifiers.new("_section_cut", 'BOOLEAN')
+            mod.operation = 'DIFFERENCE'
+            mod.object = cutter
+            cutter.display_type = 'WIRE'
+
+            # Camera looking at the cut face
+            center = mathutils.Vector((
+                (max(v.x for v in vs) + min(v.x for v in vs)) / 2,
+                (max(v.y for v in vs) + min(v.y for v in vs)) / 2,
+                (max(v.z for v in vs) + min(v.z for v in vs)) / 2,
+            ))
+            center[axis_idx] = position
+            dist = max_dim * 1.5
+
+            cam_data = bpy.data.cameras.new("_sec_cam")
+            cam_data.clip_end = max_dim * 10
+            cam_obj = bpy.data.objects.new("_sec_cam", cam_data)
+            bpy.context.collection.objects.link(cam_obj)
+            scene.camera = cam_obj
+
+            # Position camera looking at the cut from a 3/4 angle
+            offset = [0, 0, 0]
+            offset[axis_idx] = -dist * 0.3
+            offset[(axis_idx + 1) % 3] = dist * 0.8
+            offset[(axis_idx + 2) % 3] = dist * 0.4
+            cam_obj.location = (center.x + offset[0], center.y + offset[1], center.z + offset[2])
+            direction = center - cam_obj.location
+            cam_obj.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+            filepath = os.path.join(tempfile.gettempdir(), f"{entity_id}_section.png")
+            scene.render.filepath = filepath
+            scene.render.image_settings.file_format = 'PNG'
+            bpy.ops.render.render(write_still=True)
+
+            # Remove boolean modifier and cutter
+            obj.modifiers.remove(mod)
+            bpy.data.objects.remove(cutter, do_unlink=True)
+            bpy.data.objects.remove(cam_obj)
+            bpy.data.cameras.remove(cam_data)
+
+            wsl_path = filepath.replace("\\", "/")
+            if wsl_path.startswith("C:"):
+                wsl_path = "/mnt/c" + wsl_path[2:]
+
+            return {"success": True, "path": wsl_path}
+        except Exception as e:
+            # Cleanup on error
+            try:
+                if '_section_cut' in obj.modifiers:
+                    obj.modifiers.remove(obj.modifiers['_section_cut'])
+                cutter_obj = bpy.data.objects.get("_cutter")
+                if cutter_obj:
+                    bpy.data.objects.remove(cutter_obj, do_unlink=True)
+            except:
+                pass
             return {"error": str(e)}
 
     def get_mesh_stats(self, name=None):
