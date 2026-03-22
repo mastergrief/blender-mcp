@@ -1342,19 +1342,20 @@ class BlenderMCPServer:
 
             # Normalize
             normalized = False
+            norm_scale = 1.0
             if normalize:
                 vs = [v.co for v in obj.data.vertices]
                 spans_raw = {ax: max(v[i] for v in vs) - min(v[i] for v in vs) for ax, i in [('X',0),('Y',1),('Z',2)]}
                 longest = max(spans_raw.values())
                 if longest > 0:
                     import bmesh as bm_mod
-                    scale = 100.0 / longest
+                    norm_scale = 100.0 / longest
                     bm = bm_mod.new()
                     bm.from_mesh(obj.data)
                     for v in bm.verts:
-                        v.co.x *= scale
-                        v.co.y *= scale
-                        v.co.z *= scale
+                        v.co.x *= norm_scale
+                        v.co.y *= norm_scale
+                        v.co.z *= norm_scale
                     bm.to_mesh(obj.data)
                     bm.free()
                     obj.data.update()
@@ -1362,13 +1363,13 @@ class BlenderMCPServer:
                     obj.location = (0, 0, 0)
                     normalized = True
 
-            # Meshpoints
+            # Meshpoints (apply same normalization scale)
             mp_added = 0
             if add_meshpoints and meshpoints:
                 for mp in meshpoints:
                     gx, gy, gz = mp['position']
                     empty = bpy.data.objects.new(mp['name'], None)
-                    empty.location = mathutils.Vector((gx, -gz, gy))
+                    empty.location = mathutils.Vector((gx * norm_scale, -gz * norm_scale, gy * norm_scale))
                     empty.empty_display_type = 'ARROWS'
                     empty.empty_display_size = 5.0
                     if 'exhaust' in mp['name'].lower():
