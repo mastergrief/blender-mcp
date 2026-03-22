@@ -576,11 +576,11 @@ class BlenderMCPServer:
                 bpy.context.collection.objects.link(rim_obj)
                 temp_lights.append(rim_obj)
 
-                # Back light (illuminates stern view)
+                # Back light (shines from behind/+Y toward bow, illuminates stern-facing surfaces)
                 back_data = bpy.data.lights.new("_back_light", 'SUN')
                 back_data.energy = 4.0
                 back_obj = bpy.data.objects.new("_back_light", back_data)
-                back_obj.rotation_euler = (math.radians(50), 0, math.radians(180))
+                back_obj.rotation_euler = (math.radians(130), 0, 0)
                 bpy.context.collection.objects.link(back_obj)
                 temp_lights.append(back_obj)
 
