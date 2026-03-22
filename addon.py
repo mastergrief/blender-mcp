@@ -424,6 +424,145 @@ class BlenderMCPServer:
         except Exception as e:
             return {"error": str(e)}
 
+    @staticmethod
+    def _get_surface_helpers():
+        """Return helper functions for surface-aware object placement."""
+        import math as _math
+        from mathutils import Vector as _Vec
+
+        def snap_to_surface(target_obj, origin, direction=None):
+            """Raycast onto target_obj's surface. Returns (hit_point, normal) or None.
+
+            Args:
+                target_obj: Blender mesh object to raycast against
+                origin: (x,y,z) start point of ray
+                direction: (x,y,z) ray direction. If None, casts toward object center.
+            """
+            origin = _Vec(origin)
+            if direction is None:
+                # Cast from origin toward object center
+                center = target_obj.matrix_world @ _Vec(target_obj.bound_box[0]) * 0.5 + \
+                         target_obj.matrix_world @ _Vec(target_obj.bound_box[6]) * 0.5
+                direction = (center - origin).normalized()
+            else:
+                direction = _Vec(direction).normalized()
+
+            # Convert to object local space for ray_cast
+            inv = target_obj.matrix_world.inverted()
+            local_origin = inv @ origin
+            local_dir = (inv @ (origin + direction) - local_origin).normalized()
+
+            hit, loc, normal, _ = target_obj.ray_cast(local_origin, local_dir)
+            if hit:
+                world_loc = target_obj.matrix_world @ loc
+                world_normal = (target_obj.matrix_world.to_3x3() @ normal).normalized()
+                return (world_loc, world_normal)
+            return None
+
+        def place_on_surface(target_obj, approx_pos, primitive_fn, offset=0.0):
+            """Place a new object on target_obj's surface at the closest point to approx_pos.
+
+            Casts a ray from approx_pos toward the target center, places the object at
+            the hit point, and orients it along the surface normal.
+
+            Args:
+                target_obj: Mesh object to place on
+                approx_pos: (x,y,z) approximate desired position
+                primitive_fn: callable that creates the object (e.g. lambda: bpy.ops.mesh.primitive_cube_add(size=10))
+                offset: distance to offset along the normal (positive = away from surface)
+
+            Returns: the created object, or None if raycast missed
+            """
+            result = snap_to_surface(target_obj, approx_pos)
+            if not result:
+                # Try casting from further out
+                import bpy as _bpy
+                center = _Vec(target_obj.location)
+                direction = (_Vec(approx_pos) - center).normalized()
+                far_origin = center + direction * 5000
+                result = snap_to_surface(target_obj, tuple(far_origin), tuple(-direction))
+
+            if not result:
+                return None
+
+            hit_pos, normal = result
+
+            # Create the object
+            primitive_fn()
+            import bpy as _bpy
+            new_obj = _bpy.context.active_object
+
+            # Position at hit point + offset along normal
+            new_obj.location = hit_pos + normal * offset
+
+            # Orient to face along the normal
+            up = _Vec((0, 0, 1))
+            if abs(normal.dot(up)) > 0.99:
+                up = _Vec((0, 1, 0))
+            new_obj.rotation_euler = normal.to_track_quat('Z', 'Y').to_euler()
+
+            return new_obj
+
+        def scatter_on_surface(target_obj, count, primitive_fn, seed=42, offset=0.0, min_spacing=50):
+            """Scatter objects randomly across target_obj's surface.
+
+            Args:
+                target_obj: Mesh to scatter on
+                count: Number of objects to place
+                primitive_fn: callable that creates each object
+                seed: Random seed
+                offset: Normal offset
+                min_spacing: Minimum distance between placed objects
+
+            Returns: list of created objects
+            """
+            import random as _random
+            import bpy as _bpy
+            _random.seed(seed)
+
+            verts = target_obj.data.vertices
+            placed = []
+            placed_positions = []
+            attempts = 0
+            max_attempts = count * 10
+
+            while len(placed) < count and attempts < max_attempts:
+                attempts += 1
+                # Pick a random vertex and cast outward from it
+                v = _random.choice(verts)
+                world_pos = target_obj.matrix_world @ v.co
+                normal = (target_obj.matrix_world.to_3x3() @ v.normal).normalized()
+
+                # Check spacing
+                too_close = False
+                for pp in placed_positions:
+                    if (world_pos - pp).length < min_spacing:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+
+                # Place at vertex position + offset along normal
+                primitive_fn()
+                new_obj = _bpy.context.active_object
+                new_obj.location = world_pos + normal * offset
+
+                up = _Vec((0, 0, 1))
+                if abs(normal.dot(up)) > 0.99:
+                    up = _Vec((0, 1, 0))
+                new_obj.rotation_euler = normal.to_track_quat('Z', 'Y').to_euler()
+
+                placed.append(new_obj)
+                placed_positions.append(world_pos)
+
+            return placed
+
+        return {
+            'snap_to_surface': snap_to_surface,
+            'place_on_surface': place_on_surface,
+            'scatter_on_surface': scatter_on_surface,
+        }
+
     def _load_autoload_scripts(self):
         """Load helper scripts into persistent namespace on first call."""
         if BlenderMCPServer._helpers_loaded:
@@ -459,9 +598,12 @@ class BlenderMCPServer:
             # Auto-load helper scripts on first call
             self._load_autoload_scripts()
 
-            # Create namespace with bpy + persistent helpers + budget constant
+            # Create namespace with bpy + persistent helpers + budget constant + surface tools
             namespace = {"bpy": bpy, "VERT_BUDGET": 50000}
             namespace.update(BlenderMCPServer._persistent_ns)
+            # Inject surface snapping helpers
+            if 'snap_to_surface' not in namespace:
+                namespace.update(self._get_surface_helpers())
 
             # Capture stdout during execution, and return it as result
             capture_buffer = io.StringIO()
