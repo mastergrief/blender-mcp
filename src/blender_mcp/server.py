@@ -320,7 +320,7 @@ def execute_blender_code(ctx: Context, code: str) -> str:
         return f"Error executing code: {str(e)}"
 
 @mcp.tool()
-def navigate_viewport(ctx: Context, target: str = None, location: list = None, distance: float = None, view: str = None, screenshot: bool = False) -> str:
+def navigate_viewport(ctx: Context, target: str = None, location: list = None, distance: float = None, view: str = None) -> str:
     """
     Navigate the 3D viewport. Frame an object, set position, or use preset views.
 
@@ -329,7 +329,6 @@ def navigate_viewport(ctx: Context, target: str = None, location: list = None, d
     - location: Optional [x, y, z] point to look at
     - distance: Optional viewing distance
     - view: Preset view: "front", "side", "top", "persp" (sets camera angle)
-    - screenshot: If True, returns a viewport screenshot after navigating
     """
     try:
         blender = get_blender_connection()
@@ -338,7 +337,6 @@ def navigate_viewport(ctx: Context, target: str = None, location: list = None, d
             "location": location,
             "distance": distance,
             "view": view,
-            "screenshot": screenshot
         })
         if "error" in result:
             raise Exception(result["error"])

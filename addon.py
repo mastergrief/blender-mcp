@@ -469,8 +469,8 @@ class BlenderMCPServer:
         except Exception as e:
             raise Exception(f"Code execution error: {str(e)}")
 
-    def navigate_viewport(self, target=None, location=None, distance=None, view=None, screenshot=False):
-        """Navigate the 3D viewport with preset views and optional screenshot."""
+    def navigate_viewport(self, target=None, location=None, distance=None, view=None):
+        """Navigate the 3D viewport with preset views."""
         import math
         try:
             area = None
@@ -520,19 +520,11 @@ class BlenderMCPServer:
                     r3d.view_rotation = q
                     r3d.view_perspective = 'PERSP'
 
-            result = {
+            return {
                 "success": True,
                 "view_location": list(r3d.view_location),
                 "view_distance": r3d.view_distance
             }
-
-            # Optional screenshot
-            if screenshot:
-                ss = self.get_viewport_screenshot(max_size=800)
-                if "image_b64" in ss:
-                    result["image_b64"] = ss["image_b64"]
-
-            return result
         except Exception as e:
             return {"error": str(e)}
 
@@ -583,6 +575,14 @@ class BlenderMCPServer:
                 rim_obj.rotation_euler = (math.radians(20), 0, math.radians(160))
                 bpy.context.collection.objects.link(rim_obj)
                 temp_lights.append(rim_obj)
+
+                # Back light (illuminates stern view)
+                back_data = bpy.data.lights.new("_back_light", 'SUN')
+                back_data.energy = 4.0
+                back_obj = bpy.data.objects.new("_back_light", back_data)
+                back_obj.rotation_euler = (math.radians(50), 0, math.radians(180))
+                bpy.context.collection.objects.link(back_obj)
+                temp_lights.append(back_obj)
 
             # World background
             if not scene.world:
